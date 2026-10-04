@@ -28,7 +28,7 @@ class KeybindManager:
         self._is_binding: bool = False
         self._on_key_bound: Optional[Callable[[str], None]] = None
 
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     @property
     def is_listening(self) -> bool:
@@ -53,10 +53,10 @@ class KeybindManager:
 
         :param on_toggle: Функция обратного вызова при нажатии хоткея (Start/Stop).
         """
-        with self._lock:
-            self.stop()
-            self._on_toggle = on_toggle
+        self.stop()
 
+        with self._lock:
+            self._on_toggle = on_toggle
             self._listener = keyboard.Listener(on_press=self._on_key_press)
             self._listener.daemon = True
             self._listener.start()
