@@ -3,5 +3,6 @@
 """
 
 from src.gui.app import AutoClickerApp
+from src.gui.marker_window import ClickMarker
 
-__all__ = ["AutoClickerApp"]
+__all__ = ["AutoClickerApp", "ClickMarker"]

@@ -37,30 +37,32 @@
 
 ```text
 TBK-Clicker/
-├── main.py                      # Точка входа в приложение
-├── requirements.txt             # Зависимости проекта
-├── build.bat                    # Скрипт автоматической сборки в .exe
 ├── README.md                    # Документация проекта
-└── src/
-    ├── __init__.py
-    ├── core/                    # Ядро бизнес-логики
-    │   ├── __init__.py
-    │   ├── clicker_engine.py    # Потоковый движок кликера (PyAutoGUI + threading)
-    │   ├── coordinate_picker.py # Захват координат с экрана (pynput.mouse)
-    │   └── hotkey_manager.py    # Глобальные горячие клавиши F5/F6 (pynput.keyboard)
-    └── gui/                     # Графический интерфейс
+├── .gitignore                   # Настройки исключений Git
+└── TBK-Clicker Project/         # Папка проекта для PyCharm / IDE
+    ├── main.py                  # Точка входа в приложение
+    ├── requirements.txt         # Зависимости проекта
+    ├── build.bat                # Скрипт автоматической сборки в .exe
+    └── src/
         ├── __init__.py
-        └── app.py               # Главное окно приложения (CustomTkinter)
+        ├── core/                # Ядро бизнес-логики
+        │   ├── __init__.py
+        │   ├── clicker_engine.py    # Потоковый движок кликера (PyAutoGUI + threading)
+        │   ├── coordinate_picker.py # Захват координат с экрана (pynput.mouse)
+        │   └── hotkey_manager.py    # Глобальные горячие клавиши F5/F6 (pynput.keyboard)
+        └── gui/                 # Графический интерфейс
+            ├── __init__.py
+            └── app.py           # Главное окно приложения (CustomTkinter)
 ```
 
 ---
 
 ## 🚀 Установка и запуск из исходного кода
 
-### 1. Клонирование репозитория
+### 1. Клонирование репозитория и переход в папку проекта
 ```bash
 git clone https://github.com/TuBe3rKuL3z/TBK-Clicker.git
-cd TBK-Clicker
+cd "TBK-Clicker/TBK-Clicker Project"
 ```
 
 ### 2. Создание и активация виртуального окружения (рекомендуется)
