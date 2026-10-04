@@ -1,4 +1,4 @@
-# TBK-Clicker ⚡
+# TBK-Clicker
 
 Современный, быстрый и надежный desktop-автокликер для Windows с графическим интерфейсом на базе **CustomTkinter**, фоновой автоматизацией **PyAutoGUI** и глобальными хуками **pynput**.
 
