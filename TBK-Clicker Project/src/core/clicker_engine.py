@@ -1,7 +1,7 @@
 """
-Сервис циклического выполнения кликов мыши на базе низкоуровневого Windows API (ctypes).
-Обеспечивает максимальную надежность кликов в Windows, играх и проводнике,
-включая поддержку Double Click для открытия папок и файлов.
+Сервис циклического выполнения кликов мыши и нажатий клавиш клавиатуры
+на базе низкоуровневого Windows API (ctypes).
+Обеспечивает надежный кликер мыши (Single/Double, LMB/RMB) и циклический спамер клавиш (Key Presser).
 """
 
 from typing import Callable, Optional, Tuple
@@ -15,13 +15,15 @@ MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
 
+# Низкоуровневые константы Windows API keybd_event
+KEYEVENTF_KEYUP = 0x0002
+
 
 class ClickerEngine:
     """
-    Класс управления жизненным циклом автоматических кликов.
+    Класс управления фоновым циклом автоматизации (мышь или клавиатура).
     Выполняет симуляцию нажатий через ctypes.windll.user32 в изолированном потоке,
-    поддерживая динамическое считывание координат центра маркера,
-    одиночные и двойные клики (Single / Double click) и мгновенную остановку.
+    поддерживая одиночные/двойные клики мыши, спам клавиш и мгновенную остановку.
     """
 
     def __init__(self) -> None:
@@ -37,28 +39,32 @@ class ClickerEngine:
 
     @property
     def is_running(self) -> bool:
-        """Возвращает флаг активности фонового цикла кликов."""
+        """Возвращает флаг активности фонового цикла."""
         with self._lock:
             return self._is_running
 
     def start(
         self,
         interval: float,
+        mode: str = "mouse",
         button: str = "left",
         click_type: str = "single",
         coords_provider: Optional[Callable[[], Optional[Tuple[int, int]]]] = None,
+        target_vk: Optional[int] = None,
         on_error: Optional[Callable[[str], None]] = None,
         on_stopped: Optional[Callable[[], None]] = None,
     ) -> bool:
         """
-        Запускает фоновый поток циклического кликания.
+        Запускает фоновый поток циклического кликания или спама клавиши.
 
-        :param interval: Интервал между кликами в секундах.
+        :param interval: Интервал между действиями в секундах.
+        :param mode: Режим работы ('mouse' или 'keyboard').
         :param button: Кнопка мыши ('left' или 'right').
-        :param click_type: Тип клика ('single' - одиночный, 'double' - двойной).
+        :param click_type: Тип клика ('single' или 'double').
         :param coords_provider: Функция, возвращающая текущие (X, Y) маркера или None.
-        :param on_error: Коллбек при возникновении ошибки.
-        :param on_stopped: Коллбек при штатной остановке потока.
+        :param target_vk: Virtual Key код для режима клавиатуры.
+        :param on_error: Коллбек при ошибке.
+        :param on_stopped: Коллбек при остановке.
         :return: True, если поток запущен, False если уже работал.
         """
         with self._lock:
@@ -71,9 +77,9 @@ class ClickerEngine:
             self._on_stopped = on_stopped
 
             self._thread = threading.Thread(
-                target=self._click_loop,
-                args=(interval, button, click_type, coords_provider),
-                name="TBKClickerThread",
+                target=self._run_loop,
+                args=(mode, interval, button, click_type, coords_provider, target_vk),
+                name="TBKAutomationThread",
                 daemon=True,
             )
             self._thread.start()
@@ -81,9 +87,9 @@ class ClickerEngine:
 
     def stop(self) -> bool:
         """
-        Мгновенно останавливает цикл кликов и дожидается завершения потока.
+        Мгновенно останавливает цикл автоматизации и дожидается завершения потока.
 
-        :return: True, если кликер был остановлен, False если он не работал.
+        :return: True, если движок был остановлен, False если он не работал.
         """
         with self._lock:
             if not self._is_running:
@@ -100,24 +106,21 @@ class ClickerEngine:
 
         return True
 
-    def _click_loop(
+    def _run_loop(
         self,
+        mode: str,
         interval: float,
         button: str,
         click_type: str,
         coords_provider: Optional[Callable[[], Optional[Tuple[int, int]]]],
+        target_vk: Optional[int],
     ) -> None:
         """
-        Рабочий цикл кликов, выполняемый в изолированном фоновом потоке.
-
-        :param interval: Задержка между кликами в секундах.
-        :param button: Кнопка ('left' или 'right').
-        :param click_type: Режим клика ('single' или 'double').
-        :param coords_provider: Провайдер координат цели.
+        Рабочий цикл, выполняемый в изолированном фоновом потоке.
         """
         error_msg: Optional[str] = None
 
-        # Определение флагов нажатия/отпускания кнопки
+        # Подготовка флагов мыши
         if button == "right":
             down_flag = MOUSEEVENTF_RIGHTDOWN
             up_flag = MOUSEEVENTF_RIGHTUP
@@ -126,34 +129,39 @@ class ClickerEngine:
             up_flag = MOUSEEVENTF_LEFTUP
 
         try:
-            while not self._stop_event.is_set():
-                # Получаем актуальные координаты маркера (динамически при каждом клике)
-                coords = coords_provider() if coords_provider else None
+            if mode == "keyboard":
+                # Режим циклического спама клавиши клавиатуры
+                vk_code = int(target_vk) if target_vk else 13  # Default ENTER
+                while not self._stop_event.is_set():
+                    self._user32.keybd_event(vk_code, 0, 0, 0)
+                    time.sleep(0.01)
+                    self._user32.keybd_event(vk_code, 0, KEYEVENTF_KEYUP, 0)
 
-                if coords is not None:
-                    # Перемещаем курсор точно в центр маркера
-                    self._user32.SetCursorPos(int(coords[0]), int(coords[1]))
+                    if self._stop_event.wait(timeout=max(0.0001, interval)):
+                        break
+            else:
+                # Режим кликера мыши
+                while not self._stop_event.is_set():
+                    coords = coords_provider() if coords_provider else None
 
-                # Выполнение клика (одиночного или двойного для открытия папок)
-                if click_type == "double":
-                    # Первый клик
-                    self._user32.mouse_event(down_flag, 0, 0, 0, 0)
-                    self._user32.mouse_event(up_flag, 0, 0, 0, 0)
-                    # Пауза между нажатиями в рамках Double Click (40 мс)
-                    time.sleep(0.04)
-                    # Второй клик
-                    self._user32.mouse_event(down_flag, 0, 0, 0, 0)
-                    self._user32.mouse_event(up_flag, 0, 0, 0, 0)
-                else:
-                    self._user32.mouse_event(down_flag, 0, 0, 0, 0)
-                    self._user32.mouse_event(up_flag, 0, 0, 0, 0)
+                    if coords is not None:
+                        self._user32.SetCursorPos(int(coords[0]), int(coords[1]))
 
-                # Точная задержка с мгновенным пробуждением при сигнале остановки
-                if self._stop_event.wait(timeout=max(0.0001, interval)):
-                    break
+                    if click_type == "double":
+                        self._user32.mouse_event(down_flag, 0, 0, 0, 0)
+                        self._user32.mouse_event(up_flag, 0, 0, 0, 0)
+                        time.sleep(0.04)
+                        self._user32.mouse_event(down_flag, 0, 0, 0, 0)
+                        self._user32.mouse_event(up_flag, 0, 0, 0, 0)
+                    else:
+                        self._user32.mouse_event(down_flag, 0, 0, 0, 0)
+                        self._user32.mouse_event(up_flag, 0, 0, 0, 0)
+
+                    if self._stop_event.wait(timeout=max(0.0001, interval)):
+                        break
 
         except Exception as exc:
-            error_msg = f"Ошибка в потоке кликов: {exc}"
+            error_msg = f"Ошибка в потоке автоматизации: {exc}"
         finally:
             with self._lock:
                 self._is_running = False

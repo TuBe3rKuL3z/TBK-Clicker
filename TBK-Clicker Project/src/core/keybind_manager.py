@@ -1,5 +1,5 @@
 """
-Модуль управления глобальными горячими клавишами и динамического бинда клавиш.
+Модуль управления глобальными горячими клавишами и динамического захвата клавиш.
 Построен на базе pynput.keyboard для глобального перехвата в любых приложениях и играх.
 """
 
@@ -8,11 +8,30 @@ import threading
 from pynput import keyboard
 
 
+def get_key_vk(key: keyboard.Key | keyboard.KeyCode) -> Optional[int]:
+    """
+    Извлекает целочисленный Virtual Key (VK) код Windows для любой клавиши pynput.
+
+    :param key: Объект клавиши pynput.
+    :return: Целочисленный код клавиши или None.
+    """
+    if isinstance(key, keyboard.Key):
+        if hasattr(key.value, "vk") and key.value.vk is not None:
+            return int(key.value.vk)
+    elif isinstance(key, keyboard.KeyCode):
+        if key.vk is not None:
+            return int(key.vk)
+        if key.char:
+            char_upper = key.char.upper()
+            if "A" <= char_upper <= "Z" or "0" <= char_upper <= "9":
+                return ord(char_upper)
+    return None
+
+
 class KeybindManager:
     """
-    Класс управления горячей клавишей-переключателем (Start/Stop Toggle).
-    Поддерживает динамический перехват любой нажатой пользователем клавиши
-    и ее назначение в качестве активного хоткея.
+    Класс управления горячей клавишей-переключателем (Start/Stop Toggle)
+    и динамического захвата любых клавиш для бинда или клавиатурного спамера.
     """
 
     def __init__(self, default_key: keyboard.Key | keyboard.KeyCode = keyboard.Key.f6) -> None:
@@ -25,8 +44,8 @@ class KeybindManager:
         self._listener: Optional[keyboard.Listener] = None
         self._on_toggle: Optional[Callable[[], None]] = None
 
-        self._is_binding: bool = False
-        self._on_key_bound: Optional[Callable[[str], None]] = None
+        # Универсальный режим захвата одной клавиши (для хоткея или спама)
+        self._capture_callback: Optional[Callable[[keyboard.Key | keyboard.KeyCode, str, int], None]] = None
 
         self._lock = threading.RLock()
 
@@ -37,10 +56,10 @@ class KeybindManager:
             return self._listener is not None and self._listener.is_alive()
 
     @property
-    def is_binding(self) -> bool:
-        """Возвращает True, если менеджер ожидает нажатия клавиши для назначения."""
+    def is_capturing(self) -> bool:
+        """Возвращает True, если менеджер ожидает нажатия клавиши."""
         with self._lock:
-            return self._is_binding
+            return self._capture_callback is not None
 
     def get_current_key_name(self) -> str:
         """Возвращает понятное строковое имя текущей назначенной клавиши."""
@@ -64,33 +83,37 @@ class KeybindManager:
     def stop(self) -> None:
         """Останавливает глобальный слушатель клавиатуры без блокировки потока."""
         with self._lock:
-            self._is_binding = False
-            self._on_key_bound = None
+            self._capture_callback = None
 
             if self._listener is not None:
                 listener = self._listener
                 self._listener = None
                 try:
-                    # Останавливаем в отдельном потоке, исключая подвисания Windows хука
                     threading.Thread(target=listener.stop, daemon=True).start()
                 except Exception:
                     pass
 
-    def start_binding(self, on_key_bound: Callable[[str], None]) -> None:
+    def start_capture(
+        self,
+        callback: Callable[[keyboard.Key | keyboard.KeyCode, str, int], None],
+    ) -> None:
         """
-        Переводит менеджер в режим перехвата следующей нажатой клавиши.
+        Переводит менеджер в режим перехвата ровно одного следующего нажатия клавиши.
 
-        :param on_key_bound: Коллбек, принимающий строковое название назначенной клавиши.
+        :param callback: Коллбек(key_obj, key_name, vk_code).
         """
         with self._lock:
-            self._is_binding = True
-            self._on_key_bound = on_key_bound
+            self._capture_callback = callback
 
-    def cancel_binding(self) -> None:
+    def cancel_capture(self) -> None:
         """Отменяет режим ожидания нажатия клавиши."""
         with self._lock:
-            self._is_binding = False
-            self._on_key_bound = None
+            self._capture_callback = None
+
+    def set_hotkey(self, key: keyboard.Key | keyboard.KeyCode) -> None:
+        """Устанавливает активную клавишу Start/Stop."""
+        with self._lock:
+            self._current_key = key
 
     def _on_key_press(self, key: keyboard.Key | keyboard.KeyCode | None) -> None:
         """
@@ -101,24 +124,21 @@ class KeybindManager:
         if key is None:
             return
 
-        # 1. Режим назначения новой клавиши (Binding mode)
-        binding_callback: Optional[Callable[[str], None]] = None
-        key_name: str = ""
-
+        # 1. Режим перехвата клавиши (для назначения хоткея или спама)
+        callback = None
         with self._lock:
-            if self._is_binding:
-                self._is_binding = False
-                self._current_key = key
-                key_name = self._key_to_name(key)
-                binding_callback = self._on_key_bound
-                self._on_key_bound = None
+            if self._capture_callback is not None:
+                callback = self._capture_callback
+                self._capture_callback = None
 
-        if binding_callback is not None:
-            binding_callback(key_name)
+        if callback is not None:
+            name = self._key_to_name(key)
+            vk = get_key_vk(key) or 0
+            callback(key, name, vk)
             return
 
-        # 2. Обычный рабочий режим: проверка совпадения с активным хоткеем
-        toggle_callback: Optional[Callable[[], None]] = None
+        # 2. Обычный рабочий режим: проверка совпадения с хоткеем Start/Stop
+        toggle_callback = None
         with self._lock:
             if self._keys_match(key, self._current_key):
                 toggle_callback = self._on_toggle
@@ -134,19 +154,15 @@ class KeybindManager:
         """
         Проверяет совпадение двух клавиш с учетом регистра и виртуальных кодов Windows.
         """
-        # Сравнение специальных клавиш (Key.f1 .. Key.f12, Key.space и др.)
         if isinstance(key1, keyboard.Key) and isinstance(key2, keyboard.Key):
             return key1 == key2
 
-        # Сравнение символьных клавиш
         if isinstance(key1, keyboard.KeyCode) and isinstance(key2, keyboard.KeyCode):
-            # Сравнение по Virtual Key коду (не зависит от языка раскладки клавиатуры)
             if key1.vk is not None and key2.vk is not None:
                 return key1.vk == key2.vk
             if key1.char and key2.char:
                 return key1.char.lower() == key2.char.lower()
 
-        # Прямое равенство объектов
         return key1 == key2
 
     def _key_to_name(self, key: keyboard.Key | keyboard.KeyCode) -> str:
@@ -155,18 +171,20 @@ class KeybindManager:
         """
         if isinstance(key, keyboard.Key):
             name = key.name
-            # Приводим к общепринятому верхнему регистру
             return name.upper() if name else str(key)
 
         if isinstance(key, keyboard.KeyCode):
             if key.char:
                 return key.char.upper()
             if key.vk:
-                # Популярные функциональные клавиши через VK кодировку
                 if 112 <= key.vk <= 123:
                     return f"F{key.vk - 111}"
                 if 65 <= key.vk <= 90:
                     return chr(key.vk)
+                if key.vk == 13:
+                    return "ENTER"
+                if key.vk == 32:
+                    return "SPACE"
                 return f"VK_{key.vk}"
 
         return str(key).replace("Key.", "").upper()
