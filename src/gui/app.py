@@ -3,17 +3,20 @@
 Построен на библиотеке CustomTkinter в современном темном стиле.
 """
 
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 import customtkinter as ctk
 
 from src.core.coordinate_picker import CoordinatePicker
+from src.core.clicker_engine import ClickerEngine
+from src.core.hotkey_manager import HotkeyManager
 
 
 class AutoClickerApp(ctk.CTk):
     """
     Главный класс графического интерфейса приложения TBK-Clicker.
     Наследуется от ctk.CTk и инкапсулирует в себе все элементы управления,
-    разметку секций, синхронизацию скорости и захват координат с экрана.
+    разметку секций, синхронизацию скорости, захват координат с экрана,
+    фоновый цикл кликов и глобальные горячие клавиши.
     """
 
     def __init__(self) -> None:
@@ -32,14 +35,19 @@ class AutoClickerApp(ctk.CTk):
         # Флаг блокировки взаимного обновления полей скорости (защита от рекурсии)
         self._sync_lock: bool = False
 
-        # Сервис фонового захвата координат курсора с экрана
+        # Сервисы ядра приложения
         self._coord_picker: CoordinatePicker = CoordinatePicker()
+        self._clicker_engine: ClickerEngine = ClickerEngine()
+        self._hotkey_manager: HotkeyManager = HotkeyManager()
 
         # Построение графических компонентов
         self._setup_ui()
 
         # Настройка слушателей событий и валидации
         self._setup_bindings()
+
+        # Активация глобальных горячих клавиш (F5 - старт, F6 - стоп)
+        self._start_global_hotkeys()
 
         # Привязка протокола корректного закрытия окна
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -331,7 +339,6 @@ class AutoClickerApp(ctk.CTk):
                 self._sync_lock = False
 
         except (ValueError, ZeroDivisionError):
-            # Пользователь в процессе ввода (например, '0.' или некорректный символ)
             pass
 
     def _on_cps_changed(self, event: Optional[Any] = None) -> None:
@@ -362,7 +369,6 @@ class AutoClickerApp(ctk.CTk):
                 self._sync_lock = False
 
         except (ValueError, ZeroDivisionError):
-            # Пользователь в процессе ввода
             pass
 
     # --------------------------------------------------------------------------
@@ -370,17 +376,13 @@ class AutoClickerApp(ctk.CTk):
     # --------------------------------------------------------------------------
 
     def on_pick_coordinates(self) -> None:
-        """
-        Запуск фонового слушателя для фиксации клика в любой точке монитора.
-        """
+        """Запуск фонового слушателя для фиксации клика в любой точке монитора."""
         if self._coord_picker.is_active:
-            # Повторное нажатие отменяет захват
             self._coord_picker.stop()
             self._reset_pick_button()
             self.status_bar.configure(text="Выбор координат отменен")
             return
 
-        # Меняем визуальное состояние кнопки на режим ожидания
         self.btn_pick_coords.configure(
             text="⏳ Кликните в любой точке экрана...",
             fg_color="#D97706",
@@ -390,8 +392,6 @@ class AutoClickerApp(ctk.CTk):
             text="Переместите курсор в нужную точку и сделайте клик мышью для сохранения..."
         )
 
-        # Небольшая задержка перед стартом слушателя (200мс),
-        # чтобы отпускание мыши по кнопке GUI не засчиталось за целевой клик
         self.after(200, self._arm_coordinate_picker)
 
     def _arm_coordinate_picker(self) -> None:
@@ -399,16 +399,11 @@ class AutoClickerApp(ctk.CTk):
         self._coord_picker.start(callback=self._on_coordinates_captured)
 
     def _on_coordinates_captured(self, x: int, y: int) -> None:
-        """
-        Коллбек, вызываемый из потока pynput при регистрации клика.
-        Безопасно перенаправляет обновление GUI в главный поток Tkinter.
-        """
+        """Коллбек pynput: потокобезопасно направляет координаты в GUI."""
         self.after(0, lambda: self._apply_picked_coordinates(x, y))
 
     def _apply_picked_coordinates(self, x: int, y: int) -> None:
-        """
-        Применяет полученные координаты в поля X и Y в главном потоке интерфейса.
-        """
+        """Применяет полученные координаты в поля X и Y в главном потоке."""
         self.entry_x.delete(0, "end")
         self.entry_x.insert(0, str(x))
 
@@ -437,12 +432,98 @@ class AutoClickerApp(ctk.CTk):
         self.status_bar.configure(text="Координаты очищены. Клики будут выполняться в позиции курсора.")
 
     # --------------------------------------------------------------------------
-    # Методы обновления состояния интерфейса
+    # Глобальные горячие клавиши (pynput.keyboard)
     # --------------------------------------------------------------------------
+
+    def _start_global_hotkeys(self) -> None:
+        """Инициализация и запуск слушателя глобальных горячих клавиш F5/F6."""
+        self._hotkey_manager.start(
+            on_start=lambda: self.after(0, self.on_start_clicker),
+            on_stop=lambda: self.after(0, self.on_stop_clicker),
+        )
+
+    # --------------------------------------------------------------------------
+    # Управление автокликером (Старт / Стоп)
+    # --------------------------------------------------------------------------
+
+    def on_start_clicker(self) -> None:
+        """Запуск циклического автокликера с валидацией пользовательских параметров."""
+        if self._clicker_engine.is_running:
+            return
+
+        # Валидация интервала
+        raw_interval = self.entry_interval.get().strip().replace(",", ".")
+        try:
+            interval_val = float(raw_interval)
+            if interval_val <= 0:
+                raise ValueError("Интервал должен быть больше нуля")
+        except ValueError:
+            self.status_bar.configure(text="⚠️ Ошибка: введите корректный положительный интервал")
+            return
+
+        # Определение типа клика (LMB или RMB)
+        combo_val = self.combo_click_type.get()
+        button_type = "right" if ("RMB" in combo_val or "Правая" in combo_val) else "left"
+
+        # Определение координат клика
+        raw_x = self.entry_x.get().strip()
+        raw_y = self.entry_y.get().strip()
+        coords: Optional[Tuple[int, int]] = None
+
+        if raw_x or raw_y:
+            try:
+                x_val = int(raw_x)
+                y_val = int(raw_y)
+                coords = (x_val, y_val)
+            except ValueError:
+                self.status_bar.configure(
+                    text="⚠️ Ошибка: поля X и Y должны содержать целые числа, либо быть пустыми"
+                )
+                return
+
+        # Если был активен захват координат, выключаем его
+        if self._coord_picker.is_active:
+            self._coord_picker.stop()
+            self._reset_pick_button()
+
+        # Запуск фонового движка кликов
+        started = self._clicker_engine.start(
+            interval=interval_val,
+            button=button_type,
+            coords=coords,
+            on_error=self._on_clicker_error,
+            on_stopped=self._on_clicker_stopped,
+        )
+
+        if started:
+            btn_title = "ПКМ" if button_type == "right" else "ЛКМ"
+            target_str = f"точке ({coords[0]}, {coords[1]})" if coords else "позиции курсора"
+            status_msg = f"Кликер запущен: {btn_title}, каждые {interval_val}с в {target_str}"
+            self.update_status(status_msg, is_active=True)
+
+    def on_stop_clicker(self) -> None:
+        """Остановка циклического автокликера."""
+        if not self._clicker_engine.is_running:
+            return
+
+        self._clicker_engine.stop()
+        self.update_status("Кликер остановлен", is_active=False)
+
+    def _on_clicker_error(self, message: str) -> None:
+        """Потокобезопасная обработка системных ошибок кликера."""
+        self.after(0, lambda: self._handle_clicker_error(message))
+
+    def _handle_clicker_error(self, message: str) -> None:
+        """Отображение ошибки в главном потоке GUI."""
+        self.update_status(f"⚠️ {message}", is_active=False)
+
+    def _on_clicker_stopped(self) -> None:
+        """Потокобезопасное обновление статуса при завершении цикла."""
+        self.after(0, lambda: self.update_status("Кликер остановлен", is_active=False))
 
     def update_status(self, text: str, is_active: bool = False) -> None:
         """
-        Обновляет текстовый статус и индикатор работы.
+        Обновляет текстовый статус и индикатор работы в GUI.
 
         :param text: Текст состояния для статус-бара.
         :param is_active: True, если кликер работает, иначе False.
@@ -458,23 +539,12 @@ class AutoClickerApp(ctk.CTk):
 
         self.status_bar.configure(text=text)
 
-    # --------------------------------------------------------------------------
-    # Обработчики событий (заглушки для Шага 3)
-    # --------------------------------------------------------------------------
-
-    def on_start_clicker(self) -> None:
-        """Обработчик нажатия на кнопку старта автокликера (Шаг 3)."""
-        self.status_bar.configure(text="Запуск кликера будет реализован на Шаге 3...")
-
-    def on_stop_clicker(self) -> None:
-        """Обработчик нажатия на кнопку остановки автокликера (Шаг 3)."""
-        self.status_bar.configure(text="Остановка кликера будет реализована на Шаге 3...")
-
     def on_closing(self) -> None:
         """
         Безопасное завершение работы приложения при закрытии окна.
-        Гарантирует остановку фоновых потоков и слушателей.
+        Гарантирует остановку всех фоновых потоков и слушателей.
         """
-        if self._coord_picker.is_active:
-            self._coord_picker.stop()
+        self._hotkey_manager.stop()
+        self._coord_picker.stop()
+        self._clicker_engine.stop()
         self.destroy()
