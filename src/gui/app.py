@@ -3,19 +3,21 @@
 Построен на библиотеке CustomTkinter в современном темном стиле.
 """
 
-from typing import Optional
+from typing import Optional, Any
 import customtkinter as ctk
+
+from src.core.coordinate_picker import CoordinatePicker
 
 
 class AutoClickerApp(ctk.CTk):
     """
     Главный класс графического интерфейса приложения TBK-Clicker.
     Наследуется от ctk.CTk и инкапсулирует в себе все элементы управления,
-    разметку секций и первичную обработку пользовательских событий.
+    разметку секций, синхронизацию скорости и захват координат с экрана.
     """
 
     def __init__(self) -> None:
-        """Инициализация главного окна и построение интерфейса."""
+        """Инициализация главного окна, сервисов и построение интерфейса."""
         super().__init__()
 
         # Настройка глобальной темы CustomTkinter
@@ -27,18 +29,24 @@ class AutoClickerApp(ctk.CTk):
         self.geometry("450x600")
         self.resizable(False, False)
 
-        # Флаг блокировки взаимного обновления полей (для Шага 2)
-        self.is_updating_rate: bool = False
+        # Флаг блокировки взаимного обновления полей скорости (защита от рекурсии)
+        self._sync_lock: bool = False
+
+        # Сервис фонового захвата координат курсора с экрана
+        self._coord_picker: CoordinatePicker = CoordinatePicker()
 
         # Построение графических компонентов
         self._setup_ui()
+
+        # Настройка слушателей событий и валидации
+        self._setup_bindings()
 
         # Привязка протокола корректного закрытия окна
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def _setup_ui(self) -> None:
         """Инициализация и размещение всех секций пользовательского интерфейса."""
-        # Главный контейнер со скроллом или отступами
+        # Главный контейнер
         self.main_container = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.main_container.pack(fill="both", expand=True, padx=20, pady=16)
 
@@ -284,6 +292,151 @@ class AutoClickerApp(ctk.CTk):
         self.status_bar.pack(fill="x", side="bottom", pady=(6, 0))
 
     # --------------------------------------------------------------------------
+    # Привязка событий и синхронизация полей
+    # --------------------------------------------------------------------------
+
+    def _setup_bindings(self) -> None:
+        """Настройка биндингов для интерактивного пересчета скорости."""
+        self.entry_interval.bind("<KeyRelease>", self._on_interval_changed)
+        self.entry_interval.bind("<FocusOut>", self._on_interval_changed)
+
+        self.entry_cps.bind("<KeyRelease>", self._on_cps_changed)
+        self.entry_cps.bind("<FocusOut>", self._on_cps_changed)
+
+    def _on_interval_changed(self, event: Optional[Any] = None) -> None:
+        """
+        Слушатель изменения поля 'Интервал'.
+        Пересчитывает и обновляет поле CPS: CPS = 1 / Interval.
+        """
+        if self._sync_lock:
+            return
+
+        raw_val = self.entry_interval.get().strip().replace(",", ".")
+        if not raw_val:
+            return
+
+        try:
+            interval = float(raw_val)
+            if interval <= 0:
+                return
+
+            cps = 1.0 / interval
+            formatted_cps = f"{round(cps, 3):g}"
+
+            self._sync_lock = True
+            try:
+                self.entry_cps.delete(0, "end")
+                self.entry_cps.insert(0, formatted_cps)
+            finally:
+                self._sync_lock = False
+
+        except (ValueError, ZeroDivisionError):
+            # Пользователь в процессе ввода (например, '0.' или некорректный символ)
+            pass
+
+    def _on_cps_changed(self, event: Optional[Any] = None) -> None:
+        """
+        Слушатель изменения поля 'CPS'.
+        Пересчитывает и обновляет поле Интервал: Interval = 1 / CPS.
+        """
+        if self._sync_lock:
+            return
+
+        raw_val = self.entry_cps.get().strip().replace(",", ".")
+        if not raw_val:
+            return
+
+        try:
+            cps = float(raw_val)
+            if cps <= 0:
+                return
+
+            interval = 1.0 / cps
+            formatted_interval = f"{round(interval, 4):g}"
+
+            self._sync_lock = True
+            try:
+                self.entry_interval.delete(0, "end")
+                self.entry_interval.insert(0, formatted_interval)
+            finally:
+                self._sync_lock = False
+
+        except (ValueError, ZeroDivisionError):
+            # Пользователь в процессе ввода
+            pass
+
+    # --------------------------------------------------------------------------
+    # Логика захвата координат с экрана (pynput.mouse)
+    # --------------------------------------------------------------------------
+
+    def on_pick_coordinates(self) -> None:
+        """
+        Запуск фонового слушателя для фиксации клика в любой точке монитора.
+        """
+        if self._coord_picker.is_active:
+            # Повторное нажатие отменяет захват
+            self._coord_picker.stop()
+            self._reset_pick_button()
+            self.status_bar.configure(text="Выбор координат отменен")
+            return
+
+        # Меняем визуальное состояние кнопки на режим ожидания
+        self.btn_pick_coords.configure(
+            text="⏳ Кликните в любой точке экрана...",
+            fg_color="#D97706",
+            hover_color="#B45309",
+        )
+        self.status_bar.configure(
+            text="Переместите курсор в нужную точку и сделайте клик мышью для сохранения..."
+        )
+
+        # Небольшая задержка перед стартом слушателя (200мс),
+        # чтобы отпускание мыши по кнопке GUI не засчиталось за целевой клик
+        self.after(200, self._arm_coordinate_picker)
+
+    def _arm_coordinate_picker(self) -> None:
+        """Активирует слушатель мыши после завершения текущего клика по GUI."""
+        self._coord_picker.start(callback=self._on_coordinates_captured)
+
+    def _on_coordinates_captured(self, x: int, y: int) -> None:
+        """
+        Коллбек, вызываемый из потока pynput при регистрации клика.
+        Безопасно перенаправляет обновление GUI в главный поток Tkinter.
+        """
+        self.after(0, lambda: self._apply_picked_coordinates(x, y))
+
+    def _apply_picked_coordinates(self, x: int, y: int) -> None:
+        """
+        Применяет полученные координаты в поля X и Y в главном потоке интерфейса.
+        """
+        self.entry_x.delete(0, "end")
+        self.entry_x.insert(0, str(x))
+
+        self.entry_y.delete(0, "end")
+        self.entry_y.insert(0, str(y))
+
+        self._reset_pick_button()
+        self.status_bar.configure(text=f"Координаты зафиксированы: X={x}, Y={y}")
+
+    def _reset_pick_button(self) -> None:
+        """Возвращает кнопку выбора координат в исходное состояние."""
+        self.btn_pick_coords.configure(
+            text="🎯 Выбрать точку на экране",
+            fg_color="#1F6AA5",
+            hover_color="#144870",
+        )
+
+    def on_clear_coordinates(self) -> None:
+        """Очистка полей ввода координат X и Y."""
+        if self._coord_picker.is_active:
+            self._coord_picker.stop()
+            self._reset_pick_button()
+
+        self.entry_x.delete(0, "end")
+        self.entry_y.delete(0, "end")
+        self.status_bar.configure(text="Координаты очищены. Клики будут выполняться в позиции курсора.")
+
+    # --------------------------------------------------------------------------
     # Методы обновления состояния интерфейса
     # --------------------------------------------------------------------------
 
@@ -306,18 +459,8 @@ class AutoClickerApp(ctk.CTk):
         self.status_bar.configure(text=text)
 
     # --------------------------------------------------------------------------
-    # Обработчики событий (заглушки для Шагов 2 и 3)
+    # Обработчики событий (заглушки для Шага 3)
     # --------------------------------------------------------------------------
-
-    def on_pick_coordinates(self) -> None:
-        """Обработчик нажатия на кнопку выбора координат с экрана (Шаг 2)."""
-        self.status_bar.configure(text="Режим захвата координат будет реализован на Шаге 2...")
-
-    def on_clear_coordinates(self) -> None:
-        """Очистка полей ввода координат X и Y."""
-        self.entry_x.delete(0, "end")
-        self.entry_y.delete(0, "end")
-        self.status_bar.configure(text="Координаты сброшены. Клики будут в позиции курсора.")
 
     def on_start_clicker(self) -> None:
         """Обработчик нажатия на кнопку старта автокликера (Шаг 3)."""
@@ -332,4 +475,6 @@ class AutoClickerApp(ctk.CTk):
         Безопасное завершение работы приложения при закрытии окна.
         Гарантирует остановку фоновых потоков и слушателей.
         """
+        if self._coord_picker.is_active:
+            self._coord_picker.stop()
         self.destroy()
