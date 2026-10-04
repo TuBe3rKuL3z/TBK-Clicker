@@ -1,7 +1,7 @@
 """
 Модуль главного окна графического интерфейса автокликера.
-Построен на библиотеке CustomTkinter с поддержкой плавающих визуальных меток,
-динамического бинда клавиш и низкоуровневой симуляции кликов.
+Построен на библиотеке CustomTkinter с поддержкой сквозного маркера цели,
+одиночного и двойного кликов (Single / Double click) и WinAPI симуляции.
 """
 
 from typing import Optional, Any, Tuple
@@ -15,8 +15,8 @@ from src.core.keybind_manager import KeybindManager
 class AutoClickerApp(ctk.CTk):
     """
     Главный класс графического интерфейса приложения TBK-Clicker.
-    Управляет настройками скорости, типом клика, назначением горячих клавиш,
-    плавающим визуальным маркером-прицелом на экране и циклом кликов.
+    Управляет настройками скорости, типом клика (Single/Double, LMB/RMB),
+    сквозным маркером цели и горячими клавишами.
     """
 
     def __init__(self) -> None:
@@ -28,8 +28,8 @@ class AutoClickerApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         # Геометрия и заголовок
-        self.title("TBK-Clicker v2.0 — Автокликер с визуальным триггером")
-        self.geometry("460x670")
+        self.title("TBK-Clicker v2.1 — Автокликер со сквозным маркером")
+        self.geometry("460x700")
         self.resizable(False, False)
 
         # Флаг блокировки рекурсивного пересчета скорости (Интервал <-> CPS)
@@ -105,9 +105,15 @@ class AutoClickerApp(ctk.CTk):
         )
         card_title.pack(anchor="w", padx=14, pady=(10, 4))
 
+        # Контейнер для кнопок маркера
+        btn_box = ctk.CTkFrame(card, fg_color="transparent")
+        btn_box.pack(fill="x", padx=14, pady=(4, 4))
+        btn_box.columnconfigure(0, weight=2)
+        btn_box.columnconfigure(1, weight=1)
+
         # Кнопка создания / скрытия круглого маркера
         self.btn_toggle_marker = ctk.CTkButton(
-            card,
+            btn_box,
             text="🎯 Добавить маркер на экран",
             fg_color="#1F6AA5",
             hover_color="#144870",
@@ -115,7 +121,20 @@ class AutoClickerApp(ctk.CTk):
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             command=self.toggle_marker,
         )
-        self.btn_toggle_marker.pack(fill="x", padx=14, pady=(4, 6))
+        self.btn_toggle_marker.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+
+        # Кнопка ручной блокировки / сквозного режима
+        self.btn_lock_marker = ctk.CTkButton(
+            btn_box,
+            text="🔓 Перетаскивание",
+            fg_color="#3A3D40",
+            hover_color="#4E5256",
+            height=34,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            command=self.toggle_marker_lock,
+            state="disabled",
+        )
+        self.btn_lock_marker.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
         # Отображение текущих координат центра маркера в реальном времени
         self.lbl_marker_coords = ctk.CTkLabel(
@@ -125,12 +144,12 @@ class AutoClickerApp(ctk.CTk):
             text_color="#8B949E",
             anchor="w",
         )
-        self.lbl_marker_coords.pack(fill="x", padx=14, pady=(2, 4))
+        self.lbl_marker_coords.pack(fill="x", padx=14, pady=(2, 2))
 
         # Подсказка для пользователя
         lbl_hint = ctk.CTkLabel(
             card,
-            text="💡 Перетащите появившийся кружок мышью в любую точку экрана.",
+            text="💡 При старте маркер автоматически становится сквозным (клики проходят в папки/игры).",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color="#6E7681",
             justify="left",
@@ -222,26 +241,47 @@ class AutoClickerApp(ctk.CTk):
         lbl_keybind_hint.pack(fill="x", padx=14, pady=(0, 10))
 
     def _create_click_type_section(self) -> None:
-        """Карточка выбора кнопки мыши (LMB / RMB)."""
+        """Карточка параметров клика (LMB/RMB, Одиночный/Двойной)."""
         card = ctk.CTkFrame(self.main_container, corner_radius=10)
         card.pack(fill="x", pady=(0, 10))
 
-        label = ctk.CTkLabel(
+        card_title = ctk.CTkLabel(
             card,
-            text="🖱 Тип клика:",
+            text="🖱 Параметры клика",
             font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
         )
-        label.pack(side="left", padx=(14, 10), pady=10)
+        card_title.pack(anchor="w", padx=14, pady=(10, 6))
+
+        grid = ctk.CTkFrame(card, fg_color="transparent")
+        grid.pack(fill="x", padx=14, pady=(0, 12))
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+
+        # Выбор кнопки мыши
+        lbl_btn = ctk.CTkLabel(grid, text="Кнопка мыши:", font=ctk.CTkFont(family="Segoe UI", size=12))
+        lbl_btn.grid(row=0, column=0, sticky="w", padx=(0, 6), pady=(0, 3))
 
         self.combo_click_type = ctk.CTkComboBox(
-            card,
+            grid,
             values=["Левая кнопка (LMB)", "Правая кнопка (RMB)"],
             state="readonly",
-            width=220,
             font=ctk.CTkFont(family="Segoe UI", size=12),
         )
         self.combo_click_type.set("Левая кнопка (LMB)")
-        self.combo_click_type.pack(side="right", padx=(0, 14), pady=10)
+        self.combo_click_type.grid(row=1, column=0, sticky="ew", padx=(0, 6))
+
+        # Выбор режима клика (Одиночный / Двойной для папок)
+        lbl_mode = ctk.CTkLabel(grid, text="Тип нажатия:", font=ctk.CTkFont(family="Segoe UI", size=12))
+        lbl_mode.grid(row=0, column=1, sticky="w", padx=(6, 0), pady=(0, 3))
+
+        self.combo_click_mode = ctk.CTkComboBox(
+            grid,
+            values=["Одиночный (Single)", "Двойной (Double)"],
+            state="readonly",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+        )
+        self.combo_click_mode.set("Одиночный (Single)")
+        self.combo_click_mode.grid(row=1, column=1, sticky="ew", padx=(6, 0))
 
     def _create_controls_section(self) -> None:
         """Секция кнопок запуска и остановки."""
@@ -313,10 +353,15 @@ class AutoClickerApp(ctk.CTk):
                 fg_color="#852221",
                 hover_color="#631716",
             )
+            self.btn_lock_marker.configure(
+                state="normal",
+                text="🔓 Перетаскивание",
+                fg_color="#3A3D40",
+            )
             cx, cy = self._marker.get_center_coords()
             self._on_marker_moved(cx, cy)
             self.status_bar.configure(
-                text="Маркер активен. Зажмите его левой кнопкой мыши и переместите в цель."
+                text="Маркер активен. Перетащите его в цель. При старте он станет сквозным."
             )
         else:
             # Удаляем маркер
@@ -330,12 +375,44 @@ class AutoClickerApp(ctk.CTk):
                 fg_color="#1F6AA5",
                 hover_color="#144870",
             )
+            self.btn_lock_marker.configure(
+                state="disabled",
+                text="🔓 Перетаскивание",
+                fg_color="#3A3D40",
+            )
             self.lbl_marker_coords.configure(
                 text="⚪ Маркер не активен (клик в текущей позиции курсора)",
                 text_color="#8B949E",
             )
             self.status_bar.configure(
                 text="Маркер удален. Кликер будет работать в текущей позиции курсора."
+            )
+
+    def toggle_marker_lock(self) -> None:
+        """Ручное переключение между режимом перетаскивания и сквозным режимом."""
+        if self._marker is None:
+            return
+
+        new_state = not self._marker.is_click_through
+        self._marker.set_click_through(new_state)
+
+        if new_state:
+            self.btn_lock_marker.configure(
+                text="🔒 Сквозной (клик)",
+                fg_color="#2E7D32",
+                hover_color="#1B5E20",
+            )
+            self.status_bar.configure(
+                text="Маркер зафиксирован и пропускает все клики мыши сквозь себя."
+            )
+        else:
+            self.btn_lock_marker.configure(
+                text="🔓 Перетаскивание",
+                fg_color="#3A3D40",
+                hover_color="#4E5256",
+            )
+            self.status_bar.configure(
+                text="Маркер разблокирован. Зажмите его левой кнопкой мыши для перемещения."
             )
 
     def _on_marker_moved(self, center_x: int, center_y: int) -> None:
@@ -503,10 +580,24 @@ class AutoClickerApp(ctk.CTk):
         combo_val = self.combo_click_type.get()
         button_type = "right" if ("RMB" in combo_val or "Правая" in combo_val) else "left"
 
+        # Определение режима клика (Single / Double)
+        mode_val = self.combo_click_mode.get()
+        click_type = "double" if "Double" in mode_val or "Двойной" in mode_val else "single"
+
+        # Включаем сквозной режим маркера, чтобы клики физически попадали в окно/папку под ним
+        if self._marker is not None:
+            self._marker.set_click_through(True)
+            self.btn_lock_marker.configure(
+                text="🔒 Сквозной (клик)",
+                fg_color="#2E7D32",
+                hover_color="#1B5E20",
+            )
+
         # Запуск фонового движка кликов
         started = self._clicker_engine.start(
             interval=interval_val,
             button=button_type,
+            click_type=click_type,
             coords_provider=self.get_target_coordinates,
             on_error=self._on_clicker_error,
             on_stopped=self._on_clicker_stopped,
@@ -516,7 +607,8 @@ class AutoClickerApp(ctk.CTk):
             coords = self.get_target_coordinates()
             target_str = f"центр маркера ({coords[0]}, {coords[1]})" if coords else "позиция курсора"
             btn_title = "ПКМ" if button_type == "right" else "ЛКМ"
-            msg = f"Кликер запущен: {btn_title}, интервал {interval_val}с ({target_str})"
+            mode_title = "2x Double" if click_type == "double" else "1x Single"
+            msg = f"Кликер запущен: {btn_title} [{mode_title}], интервал {interval_val}с ({target_str})"
             self.update_status(msg, is_active=True)
 
     def on_stop_clicker(self) -> None:
@@ -525,15 +617,42 @@ class AutoClickerApp(ctk.CTk):
             return
 
         self._clicker_engine.stop()
+
+        # Возвращаем маркер в режим перетаскивания
+        if self._marker is not None:
+            self._marker.set_click_through(False)
+            self.btn_lock_marker.configure(
+                text="🔓 Перетаскивание",
+                fg_color="#3A3D40",
+                hover_color="#4E5256",
+            )
+
         self.update_status("Кликер остановлен", is_active=False)
 
     def _on_clicker_error(self, message: str) -> None:
         """Потокобезопасный вызов при системной ошибке кликера."""
-        self.after(0, lambda: self.update_status(f"⚠️ {message}", is_active=False))
+        self.after(0, lambda: self._handle_clicker_error(message))
+
+    def _handle_clicker_error(self, message: str) -> None:
+        """Обработка ошибки кликера в GUI."""
+        if self._marker is not None:
+            self._marker.set_click_through(False)
+        self.update_status(f"⚠️ {message}", is_active=False)
 
     def _on_clicker_stopped(self) -> None:
         """Потокобезопасный вызов при завершении потока кликов."""
-        self.after(0, lambda: self.update_status("Кликер остановлен", is_active=False))
+        self.after(0, lambda: self._handle_clicker_stopped())
+
+    def _handle_clicker_stopped(self) -> None:
+        """Обновление состояния GUI при остановке потока кликера."""
+        if self._marker is not None:
+            self._marker.set_click_through(False)
+            self.btn_lock_marker.configure(
+                text="🔓 Перетаскивание",
+                fg_color="#3A3D40",
+                hover_color="#4E5256",
+            )
+        self.update_status("Кликер остановлен", is_active=False)
 
     def update_status(self, text: str, is_active: bool = False) -> None:
         """Обновляет индикатор работы и текст в статус-баре."""

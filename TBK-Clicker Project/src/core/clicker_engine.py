@@ -1,11 +1,13 @@
 """
 Сервис циклического выполнения кликов мыши на базе низкоуровневого Windows API (ctypes).
-Обеспечивает максимальную надежность кликов в Windows, играх и полноэкранных приложениях.
+Обеспечивает максимальную надежность кликов в Windows, играх и проводнике,
+включая поддержку Double Click для открытия папок и файлов.
 """
 
 from typing import Callable, Optional, Tuple
 import ctypes
 import threading
+import time
 
 # Низкоуровневые константы Windows API mouse_event
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -18,7 +20,8 @@ class ClickerEngine:
     """
     Класс управления жизненным циклом автоматических кликов.
     Выполняет симуляцию нажатий через ctypes.windll.user32 в изолированном потоке,
-    поддерживая динамическое считывание координат центра маркера и мгновенную остановку.
+    поддерживая динамическое считывание координат центра маркера,
+    одиночные и двойные клики (Single / Double click) и мгновенную остановку.
     """
 
     def __init__(self) -> None:
@@ -42,6 +45,7 @@ class ClickerEngine:
         self,
         interval: float,
         button: str = "left",
+        click_type: str = "single",
         coords_provider: Optional[Callable[[], Optional[Tuple[int, int]]]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         on_stopped: Optional[Callable[[], None]] = None,
@@ -51,6 +55,7 @@ class ClickerEngine:
 
         :param interval: Интервал между кликами в секундах.
         :param button: Кнопка мыши ('left' или 'right').
+        :param click_type: Тип клика ('single' - одиночный, 'double' - двойной).
         :param coords_provider: Функция, возвращающая текущие (X, Y) маркера или None.
         :param on_error: Коллбек при возникновении ошибки.
         :param on_stopped: Коллбек при штатной остановке потока.
@@ -67,7 +72,7 @@ class ClickerEngine:
 
             self._thread = threading.Thread(
                 target=self._click_loop,
-                args=(interval, button, coords_provider),
+                args=(interval, button, click_type, coords_provider),
                 name="TBKClickerThread",
                 daemon=True,
             )
@@ -99,6 +104,7 @@ class ClickerEngine:
         self,
         interval: float,
         button: str,
+        click_type: str,
         coords_provider: Optional[Callable[[], Optional[Tuple[int, int]]]],
     ) -> None:
         """
@@ -106,6 +112,7 @@ class ClickerEngine:
 
         :param interval: Задержка между кликами в секундах.
         :param button: Кнопка ('left' или 'right').
+        :param click_type: Режим клика ('single' или 'double').
         :param coords_provider: Провайдер координат цели.
         """
         error_msg: Optional[str] = None
@@ -127,9 +134,19 @@ class ClickerEngine:
                     # Перемещаем курсор точно в центр маркера
                     self._user32.SetCursorPos(int(coords[0]), int(coords[1]))
 
-                # Отправка низкоуровневых событий нажатия и отпускания кнопки мыши
-                self._user32.mouse_event(down_flag, 0, 0, 0, 0)
-                self._user32.mouse_event(up_flag, 0, 0, 0, 0)
+                # Выполнение клика (одиночного или двойного для открытия папок)
+                if click_type == "double":
+                    # Первый клик
+                    self._user32.mouse_event(down_flag, 0, 0, 0, 0)
+                    self._user32.mouse_event(up_flag, 0, 0, 0, 0)
+                    # Пауза между нажатиями в рамках Double Click (40 мс)
+                    time.sleep(0.04)
+                    # Второй клик
+                    self._user32.mouse_event(down_flag, 0, 0, 0, 0)
+                    self._user32.mouse_event(up_flag, 0, 0, 0, 0)
+                else:
+                    self._user32.mouse_event(down_flag, 0, 0, 0, 0)
+                    self._user32.mouse_event(up_flag, 0, 0, 0, 0)
 
                 # Точная задержка с мгновенным пробуждением при сигнале остановки
                 if self._stop_event.wait(timeout=max(0.0001, interval)):
