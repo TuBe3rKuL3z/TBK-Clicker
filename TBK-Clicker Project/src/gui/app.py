@@ -1,23 +1,26 @@
 """
 Модуль главного окна графического интерфейса автокликера.
-Построен на библиотеке CustomTkinter с поддержкой плавающих визуальных меток.
+Построен на библиотеке CustomTkinter с поддержкой плавающих визуальных меток,
+динамического бинда клавиш и низкоуровневой симуляции кликов.
 """
 
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 import customtkinter as ctk
 
 from src.gui.marker_window import ClickMarker
+from src.core.clicker_engine import ClickerEngine
+from src.core.keybind_manager import KeybindManager
 
 
 class AutoClickerApp(ctk.CTk):
     """
     Главный класс графического интерфейса приложения TBK-Clicker.
-    Управляет настройками скорости, типом клика, назначением горячих клавиш
-    и плавающим визуальным маркером-прицелом на экране.
+    Управляет настройками скорости, типом клика, назначением горячих клавиш,
+    плавающим визуальным маркером-прицелом на экране и циклом кликов.
     """
 
     def __init__(self) -> None:
-        """Инициализация главного окна и построение интерфейса."""
+        """Инициализация главного окна, сервисов и построение интерфейса."""
         super().__init__()
 
         # Глобальная тема оформления
@@ -35,15 +38,21 @@ class AutoClickerApp(ctk.CTk):
         # Плавающий визуальный маркер на экране
         self._marker: Optional[ClickMarker] = None
 
+        # Ядро логики: движок кликов и менеджер хоткеев
+        self._clicker_engine: ClickerEngine = ClickerEngine()
+        self._keybind_manager: KeybindManager = KeybindManager()
+
         # Текущая назначенная клавиша переключателя (Start/Stop Toggle)
-        self._current_hotkey_name: str = "F6"
-        self._is_listening_for_key: bool = False
+        self._current_hotkey_name: str = self._keybind_manager.get_current_key_name()
 
         # Построение графических компонентов
         self._setup_ui()
 
         # Привязка слушателей ввода
         self._setup_bindings()
+
+        # Активация глобального отслеживания хоткея
+        self._start_hotkey_listener()
 
         # Корректное закрытие приложения
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -268,7 +277,7 @@ class AutoClickerApp(ctk.CTk):
         # Подсказка о хоткее
         self.lbl_hotkey_info = ctk.CTkLabel(
             self.main_container,
-            text=f"Глобальная клавиша: [{self._current_hotkey_name}] — Старт / Стоп",
+            text=f"Глобальная клавиша: [{self._current_hotkey_name}] — Старт / Стоп (Toggle)",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color="#8B949E",
         )
@@ -338,9 +347,10 @@ class AutoClickerApp(ctk.CTk):
             text_color="#00D2FF",
         )
 
-    def get_target_coordinates(self) -> Optional[tuple[int, int]]:
+    def get_target_coordinates(self) -> Optional[Tuple[int, int]]:
         """
-        Возвращает координаты цели: центр маркера или None (если маркер скрыт).
+        Возвращает координаты цели: актуальный центр маркера или None.
+        Вызывается движком кликов перед каждым нажатием.
         """
         if self._marker is not None:
             return self._marker.get_center_coords()
@@ -413,24 +423,117 @@ class AutoClickerApp(ctk.CTk):
             pass
 
     # --------------------------------------------------------------------------
-    # Назначение клавиши (Keybind) — заглушка для Шага 2
+    # Глобальные горячие клавиши и динамический бинд
     # --------------------------------------------------------------------------
+
+    def _start_hotkey_listener(self) -> None:
+        """Запуск фонового глобального слушателя переключателя."""
+        self._keybind_manager.start(on_toggle=lambda: self.after(0, self.toggle_clicker))
 
     def on_start_keybind_listening(self) -> None:
-        """Переход в режим назначения новой клавиши (реализация в Шаге 2)."""
-        self.status_bar.configure(text="Перехват клавиши будет подключен на Шаге 2...")
+        """Переводит приложение в режим ожидания нажатия любой клавиши."""
+        if self._keybind_manager.is_binding:
+            # Повторное нажатие отменяет режим перехвата
+            self._keybind_manager.cancel_binding()
+            self._reset_keybind_button()
+            self.status_bar.configure(text="Назначение клавиши отменено.")
+            return
+
+        # Визуальный индикатор ожидания нажатия
+        self.btn_keybind.configure(
+            text="⏳ Нажмите любую клавишу на клавиатуре...",
+            fg_color="#D97706",
+            hover_color="#B45309",
+        )
+        self.status_bar.configure(
+            text="Ожидание нажатия: нажмите любую клавишу для сохранения в качестве хоткея..."
+        )
+
+        # Активация режима бинда в KeybindManager
+        self._keybind_manager.start_binding(on_key_bound=self._on_key_bound)
+
+    def _on_key_bound(self, key_name: str) -> None:
+        """Потокобезопасный коллбек после перехвата клавиши."""
+        self.after(0, lambda: self._apply_key_bound(key_name))
+
+    def _apply_key_bound(self, key_name: str) -> None:
+        """Применяет назначенную клавишу в графическом интерфейсе."""
+        self._current_hotkey_name = key_name
+        self._reset_keybind_button()
+        self.lbl_hotkey_info.configure(
+            text=f"Глобальная клавиша: [{key_name}] — Старт / Стоп (Toggle)"
+        )
+        self.status_bar.configure(text=f"Клавиша [{key_name}] успешно назначена!")
+
+    def _reset_keybind_button(self) -> None:
+        """Возвращает кнопку бинда клавиши в стандартный вид."""
+        self.btn_keybind.configure(
+            text=f"⌨️ Назначить клавишу (Текущая: {self._current_hotkey_name})",
+            fg_color="#3A3D40",
+            hover_color="#4E5256",
+        )
 
     # --------------------------------------------------------------------------
-    # Управление кликером — заглушки для Шага 2
+    # Управление кликером (Старт / Стоп / Toggle)
     # --------------------------------------------------------------------------
+
+    def toggle_clicker(self) -> None:
+        """Переключатель (Toggle): если работает — останавливает, иначе запускает."""
+        if self._clicker_engine.is_running:
+            self.on_stop_clicker()
+        else:
+            self.on_start_clicker()
 
     def on_start_clicker(self) -> None:
-        """Запуск кликера (реализация в Шаге 2)."""
-        self.status_bar.configure(text="Поток кликера будет реализован на Шаге 2...")
+        """Запуск кликера с валидацией параметров скорости."""
+        if self._clicker_engine.is_running:
+            return
+
+        # Валидация интервала
+        raw_interval = self.entry_interval.get().strip().replace(",", ".")
+        try:
+            interval_val = float(raw_interval)
+            if interval_val <= 0:
+                raise ValueError("Интервал должен быть больше нуля")
+        except ValueError:
+            self.status_bar.configure(text="⚠️ Ошибка: укажите корректный интервал (> 0)")
+            return
+
+        # Определение типа кнопки (LMB / RMB)
+        combo_val = self.combo_click_type.get()
+        button_type = "right" if ("RMB" in combo_val or "Правая" in combo_val) else "left"
+
+        # Запуск фонового движка кликов
+        started = self._clicker_engine.start(
+            interval=interval_val,
+            button=button_type,
+            coords_provider=self.get_target_coordinates,
+            on_error=self._on_clicker_error,
+            on_stopped=self._on_clicker_stopped,
+        )
+
+        if started:
+            coords = self.get_target_coordinates()
+            target_str = f"центр маркера ({coords[0]}, {coords[1]})" if coords else "позиция курсора"
+            btn_title = "ПКМ" if button_type == "right" else "ЛКМ"
+            msg = f"Кликер запущен: {btn_title}, интервал {interval_val}с ({target_str})"
+            self.update_status(msg, is_active=True)
 
     def on_stop_clicker(self) -> None:
-        """Остановка кликера (реализация в Шаге 2)."""
-        self.status_bar.configure(text="Остановка кликера будет реализована на Шаге 2...")
+        """Остановка циклического автокликера."""
+        if not self._clicker_engine.is_running:
+            return
+
+        self._clicker_engine.stop()
+        self.update_status("Кликер остановлен", is_active=False)
+
+    def _on_clicker_error(self, message: str) -> None:
+        """Потокобезопасный вызов при системной ошибке кликера."""
+        self.after(0, lambda: self.update_status(f"⚠️ {message}", is_active=False))
+
+    def _on_clicker_stopped(self) -> None:
+        """Потокобезопасный вызов при завершении потока кликов."""
+        self.after(0, lambda: self.update_status("Кликер остановлен", is_active=False))
 
     def update_status(self, text: str, is_active: bool = False) -> None:
         """Обновляет индикатор работы и текст в статус-баре."""
@@ -447,6 +550,8 @@ class AutoClickerApp(ctk.CTk):
 
     def on_closing(self) -> None:
         """Безопасное завершение работы приложения при закрытии окна."""
+        self._keybind_manager.stop()
+        self._clicker_engine.stop()
         if self._marker is not None:
             try:
                 self._marker.destroy()

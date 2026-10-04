@@ -1,14 +1,12 @@
 """
 Ядро бизнес-логики приложения TBK-Clicker.
-Содержит сервисы автоматизации, слушатели ввода и математические расчеты.
+Содержит службы симуляции мыши и менеджер глобальных биндов клавиатуры.
 """
 
-from src.core.coordinate_picker import CoordinatePicker
 from src.core.clicker_engine import ClickerEngine
-from src.core.hotkey_manager import HotkeyManager
+from src.core.keybind_manager import KeybindManager
 
 __all__ = [
-    "CoordinatePicker",
     "ClickerEngine",
-    "HotkeyManager",
+    "KeybindManager",
 ]

@@ -1,24 +1,29 @@
 """
-Сервис циклического выполнения кликов мыши на базе PyAutoGUI и threading.
+Сервис циклического выполнения кликов мыши на базе низкоуровневого Windows API (ctypes).
+Обеспечивает максимальную надежность кликов в Windows, играх и полноэкранных приложениях.
 """
 
 from typing import Callable, Optional, Tuple
+import ctypes
 import threading
-import pyautogui
 
-# Отключаем встроенную искусственную паузу PyAutoGUI между вызовами (по умолчанию 0.1 сек)
-pyautogui.PAUSE = 0.0
+# Низкоуровневые константы Windows API mouse_event
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
 
 
 class ClickerEngine:
     """
     Класс управления жизненным циклом автоматических кликов.
-    Выполняет клики в отдельном фоновом потоке с возможностью мгновенной остановки
-    через threading.Event.
+    Выполняет симуляцию нажатий через ctypes.windll.user32 в изолированном потоке,
+    поддерживая динамическое считывание координат центра маркера и мгновенную остановку.
     """
 
     def __init__(self) -> None:
         """Инициализация движка кликера."""
+        self._user32 = ctypes.windll.user32
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -29,7 +34,7 @@ class ClickerEngine:
 
     @property
     def is_running(self) -> bool:
-        """Возвращает текущее состояние работы кликера."""
+        """Возвращает флаг активности фонового цикла кликов."""
         with self._lock:
             return self._is_running
 
@@ -37,7 +42,7 @@ class ClickerEngine:
         self,
         interval: float,
         button: str = "left",
-        coords: Optional[Tuple[int, int]] = None,
+        coords_provider: Optional[Callable[[], Optional[Tuple[int, int]]]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         on_stopped: Optional[Callable[[], None]] = None,
     ) -> bool:
@@ -46,10 +51,10 @@ class ClickerEngine:
 
         :param interval: Интервал между кликами в секундах.
         :param button: Кнопка мыши ('left' или 'right').
-        :param coords: Кортеж (x, y) координат экрана или None для текущей позиции.
-        :param on_error: Коллбек для передачи текста ошибки.
-        :param on_stopped: Коллбек при завершении работы потока.
-        :return: True, если поток успешно запущен, False если уже работал.
+        :param coords_provider: Функция, возвращающая текущие (X, Y) маркера или None.
+        :param on_error: Коллбек при возникновении ошибки.
+        :param on_stopped: Коллбек при штатной остановке потока.
+        :return: True, если поток запущен, False если уже работал.
         """
         with self._lock:
             if self._is_running:
@@ -62,8 +67,8 @@ class ClickerEngine:
 
             self._thread = threading.Thread(
                 target=self._click_loop,
-                args=(interval, button, coords),
-                name="ClickerEngineThread",
+                args=(interval, button, coords_provider),
+                name="TBKClickerThread",
                 daemon=True,
             )
             self._thread.start()
@@ -71,7 +76,7 @@ class ClickerEngine:
 
     def stop(self) -> bool:
         """
-        Останавливает цикл кликов и ожидает завершения потока.
+        Мгновенно останавливает цикл кликов и дожидается завершения потока.
 
         :return: True, если кликер был остановлен, False если он не работал.
         """
@@ -80,9 +85,9 @@ class ClickerEngine:
                 return False
             self._stop_event.set()
 
-        # Ожидание остановки потока без удержания блокировки
+        # Ожидание остановки потока без захвата блокировки
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=0.6)
 
         with self._lock:
             self._is_running = False
@@ -94,41 +99,50 @@ class ClickerEngine:
         self,
         interval: float,
         button: str,
-        coords: Optional[Tuple[int, int]],
+        coords_provider: Optional[Callable[[], Optional[Tuple[int, int]]]],
     ) -> None:
         """
-        Рабочий цикл кликера, выполняемый в изолированном потоке.
+        Рабочий цикл кликов, выполняемый в изолированном фоновом потоке.
 
         :param interval: Задержка между кликами в секундах.
-        :param button: Тип кнопки мыши ('left' или 'right').
-        :param coords: Целевые координаты (X, Y) или None.
+        :param button: Кнопка ('left' или 'right').
+        :param coords_provider: Провайдер координат цели.
         """
-        error_message: Optional[str] = None
+        error_msg: Optional[str] = None
+
+        # Определение флагов нажатия/отпускания кнопки
+        if button == "right":
+            down_flag = MOUSEEVENTF_RIGHTDOWN
+            up_flag = MOUSEEVENTF_RIGHTUP
+        else:
+            down_flag = MOUSEEVENTF_LEFTDOWN
+            up_flag = MOUSEEVENTF_LEFTUP
 
         try:
             while not self._stop_event.is_set():
-                # Выполнение клика в заданной точке или в текущей позиции курсора
-                if coords is not None:
-                    pyautogui.click(x=coords[0], y=coords[1], button=button)
-                else:
-                    pyautogui.click(button=button)
+                # Получаем актуальные координаты маркера (динамически при каждом клике)
+                coords = coords_provider() if coords_provider else None
 
-                # Точная пауза с мгновенным пробуждением при сигнале остановки
-                # Если сработал stop_event, wait вернет True и цикл немедленно прервется
+                if coords is not None:
+                    # Перемещаем курсор точно в центр маркера
+                    self._user32.SetCursorPos(int(coords[0]), int(coords[1]))
+
+                # Отправка низкоуровневых событий нажатия и отпускания кнопки мыши
+                self._user32.mouse_event(down_flag, 0, 0, 0, 0)
+                self._user32.mouse_event(up_flag, 0, 0, 0, 0)
+
+                # Точная задержка с мгновенным пробуждением при сигнале остановки
                 if self._stop_event.wait(timeout=max(0.0001, interval)):
                     break
 
-        except pyautogui.FailSafeException:
-            # Срабатывание встроенной защиты FailSafe (курсор переведен в угол экрана)
-            error_message = "Защита PyAutoGUI: курсор в углу экрана. Кликер остановлен."
         except Exception as exc:
-            error_message = f"Ошибка в потоке кликера: {exc}"
+            error_msg = f"Ошибка в потоке кликов: {exc}"
         finally:
             with self._lock:
                 self._is_running = False
 
-            if error_message and self._on_error:
-                self._on_error(error_message)
+            if error_msg and self._on_error:
+                self._on_error(error_msg)
 
             if self._on_stopped:
                 self._on_stopped()
